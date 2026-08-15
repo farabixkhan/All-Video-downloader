@@ -33,10 +33,15 @@ function formatBytes(n: number): string {
 interface VideoCardProps {
   info: VideoInfo
   sourceUrl: string
-  onDownloaded: (item: HistoryItem) => void
+  /** Called IMMEDIATELY when Download is clicked (status: "downloading") so
+   * the item appears in history right away, before the server responds. */
+  onQueued: (item: HistoryItem) => void
+  /** Called once the server responds, patching the same history item by id
+   * with the final status ("complete" or "failed") and result details. */
+  onSettled: (id: string, patch: Partial<HistoryItem>) => void
 }
 
-export function VideoCard({ info, sourceUrl, onDownloaded }: VideoCardProps) {
+export function VideoCard({ info, sourceUrl, onQueued, onSettled }: VideoCardProps) {
   const [quality, setQuality] = useState(info.formats[0]?.value ?? "best")
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +51,23 @@ export function VideoCard({ info, sourceUrl, onDownloaded }: VideoCardProps) {
     setDownloading(true)
     setError(null)
     setDone(null)
+
+    // Instant feedback: add the history item right away, before the network
+    // request even starts, so the user sees it appear immediately.
+    const historyId = crypto.randomUUID()
+    onQueued({
+      id: historyId,
+      url: sourceUrl,
+      title: info.title,
+      thumbnail: info.thumbnail,
+      platform: info.platform,
+      quality,
+      filename: "",
+      fileId: "",
+      downloadedAt: new Date().toISOString(),
+      status: "downloading",
+    })
+
     try {
       const res = await fetch("/api/download", {
         method: "POST",
@@ -55,21 +77,17 @@ export function VideoCard({ info, sourceUrl, onDownloaded }: VideoCardProps) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? "Download failed")
       setDone(data)
-      onDownloaded({
-        id: crypto.randomUUID(),
-        url: sourceUrl,
-        title: info.title,
-        thumbnail: info.thumbnail,
-        platform: info.platform,
-        quality,
+      onSettled(historyId, {
         filename: data.filename,
         fileId: data.fileId,
-        downloadedAt: new Date().toISOString(),
+        status: "complete",
       })
       // Trigger the browser download
       window.location.href = `/api/file/${data.fileId}`
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Download failed")
+      const message = e instanceof Error ? e.message : "Download failed"
+      setError(message)
+      onSettled(historyId, { status: "failed", error: message })
     } finally {
       setDownloading(false)
     }
@@ -142,7 +160,8 @@ export function VideoCard({ info, sourceUrl, onDownloaded }: VideoCardProps) {
 
             {downloading && (
               <p className="text-xs text-muted-foreground">
-                Fetching and converting on the server — large videos can take a minute…
+                Added to your download list below — fetching and converting on the server now
+                (large videos can take longer)…
               </p>
             )}
             {done && (

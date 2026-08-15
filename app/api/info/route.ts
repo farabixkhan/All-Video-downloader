@@ -2,11 +2,17 @@ import { NextRequest, NextResponse } from "next/server"
 import { isValidUrl, detectPlatform, platformKey, QUALITY_MAP } from "@/lib/ytdlp"
 import { probeWithFallbacks, classifyFailure } from "@/lib/extract"
 import { cookiesPathForPlatform, SESSION_COOKIE } from "@/lib/session"
+import { isSafeToFetch } from "@/lib/security/safe-url"
+import { checkRateLimit, clientKey, extractGuard } from "@/lib/security/rate-limit"
 import { VideoInfo } from "@/types"
 
 export const maxDuration = 120
 
 export async function POST(request: NextRequest) {
+  if (!checkRateLimit(`info:${clientKey(request)}`, 20, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — please slow down and try again in a minute." }, { status: 429 })
+  }
+
   let url = ""
   try {
     const body = await request.json()
@@ -17,6 +23,17 @@ export async function POST(request: NextRequest) {
 
   if (!isValidUrl(url)) {
     return NextResponse.json({ error: "Please enter a valid http(s) URL" }, { status: 400 })
+  }
+  const safety = await isSafeToFetch(url)
+  if (!safety.ok) {
+    return NextResponse.json({ error: "This URL points to a private/internal address and cannot be fetched." }, { status: 400 })
+  }
+
+  if (!extractGuard.tryAcquire()) {
+    return NextResponse.json(
+      { error: "The server is busy handling other requests right now — please try again in a few seconds." },
+      { status: 503 }
+    )
   }
 
   const sessionId = request.cookies.get(SESSION_COOKIE)?.value
@@ -60,5 +77,7 @@ export async function POST(request: NextRequest) {
       { error: failure.message, category: failure.category, detail: failure.detail },
       { status: 422 }
     )
+  } finally {
+    extractGuard.release()
   }
 }

@@ -2,6 +2,7 @@ import path from "path"
 import { promises as fs } from "fs"
 import { execFileAsync, cookieArgs, MAX_FILESIZE } from "./ytdlp"
 import { validateMediaFile } from "./validate"
+import { safeFetch, UnsafeUrlError } from "./security/safe-fetch"
 
 export const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -18,6 +19,7 @@ export type FailureCategory =
   | "anti-bot"
   | "unsupported"
   | "too-large"
+  | "blocked-url"
   | "unavailable"
 
 export interface ExtractionFailure {
@@ -29,32 +31,48 @@ export interface ExtractionFailure {
 const CATEGORY_MESSAGES: Record<FailureCategory, string> = {
   drm: "This video is DRM-protected (encrypted). Downloading it is not technically possible.",
   "geo-restricted":
-    "This video is geo-restricted and not available from the server's region.",
+    "This video is geo-restricted by its uploader/platform and isn't available from the server's region — this is unrelated to cookies or login.",
   "login-required":
-    "This video requires a login / age verification. Add cookies for this platform (top-right Cookies button) to unlock it.",
+    "This video requires a login / age verification. Add cookies for this platform (top-right Cookies button) to unlock it. Note: some failures also come from expired cookies, YouTube's PO-Token requirement, or IP-based rate limiting — cookies alone won't fix those.",
   deleted: "This video appears to be deleted, private, or no longer available.",
   "anti-bot":
     "The site is blocking automated access (anti-bot / CAPTCHA). Adding cookies sometimes helps.",
   unsupported:
     "No downloadable public video stream could be detected on this page after trying all extraction methods.",
   "too-large": `This file is larger than the ${MAX_FILESIZE} limit — try a lower quality.`,
+  "blocked-url": "This URL points to a private/internal address and cannot be fetched.",
   unavailable: "No playable media could be extracted from this URL.",
 }
 
+/**
+ * IMPORTANT: `rawMsg` for a failed yt-dlp attempt is Node's
+ * "Command failed: yt-dlp <full args...>\n<actual stderr>" — the full
+ * command line (including our own --max-filesize / --cookies flags) is
+ * echoed back verbatim. Any classifier regex must only match yt-dlp's own
+ * runtime error text, never a flag name that we ourselves passed on the
+ * command line, or every failure gets mis-labeled as that category
+ * (e.g. "--max-filesize 5G" in the echoed command falsely matching a bare
+ * "max-filesize" check even when the real error was something unrelated,
+ * such as "Requested format is not available").
+ */
 export function classifyFailure(rawMsg: string): ExtractionFailure {
   const m = rawMsg.toLowerCase()
   let category: FailureCategory = "unavailable"
   if (/drm|widevine|fairplay|playready|this video is protected|encrypted media|license url/.test(m))
     category = "drm"
-  else if (/geo.?restrict|not available in your (country|region)|georestricted|geo.?block/.test(m))
+  else if (/geo.?restrict|not available in your (country|region)|georestricted|geo.?block|not made this video available/.test(m))
     category = "geo-restricted"
   else if (
-    /sign in|log ?in required|login required|private video|authentication|confirm your age|age.?(gate|restrict|verification)|cookies-from-browser|empty media response|requested content is not available, rate.?limit/.test(m)
+    /sign in|log ?in required|login required|private video|authentication|confirm your age|age.?(gate|restrict|verification)|cookies-from-browser|empty media response|requested content is not available, rate.?limit|po ?token/.test(m)
   )
     category = "login-required"
   else if (/removed|deleted|no longer available|video unavailable|does not exist|404|not found/.test(m))
     category = "deleted"
-  else if (/max-filesize|file is larger than/.test(m)) category = "too-large"
+  // Only the exact runtime phrase yt-dlp prints when a file exceeds
+  // --max-filesize counts — NOT just the presence of the flag name (which
+  // always appears in the echoed command line for every attempt).
+  else if (/file is larger than max-filesize/.test(m)) category = "too-large"
+  else if (/blocked unsafe url|private\/internal/.test(m)) category = "blocked-url"
   else if (/403|forbidden|captcha|cloudflare|access denied|blocked|429|too many requests|challenge|bot/.test(m))
     category = "anti-bot"
   else if (/unsupported url|no video formats|unable to extract/.test(m)) category = "unsupported"
@@ -120,7 +138,7 @@ function detectEmbeds(html: string, baseUrl: string): MediaCandidate[] {
 const MEDIA_URL_RE =
   /https?:\/\/[^"'\s\\<>]+?\.(?:mp4|webm|mov|m4v|mkv|m3u8|mpd)(?:\?[^"'\s\\<>]*)?/gi
 const JUNK_RE =
-  /thumb|sprite|preview|poster|logo|banner|advert|\/ads?[\/._-]|pixel|tracker|analytics|\.svg|blank|placeholder|trailer_sm|_fb\.mp4/i
+  /thumb|sprite|preview|poster|logo|banner|advert|\/ads?[\/._-]|pixel|tracker|analytics|\.svg|blank|placeholder|trailer_sm|_fb\.mp4|apk_new|\/apk[\/._-]|app.?install|app.?download|promo_?video|splash/i
 
 function kindOf(u: string): MediaCandidate["kind"] {
   if (/\.m3u8(\?|$)|\/hls[\/?]/i.test(u)) return "hls"
@@ -136,13 +154,13 @@ function unescapeHtml(s: string): string {
     .replace(/&#0?38;/g, "&")
 }
 
+/** SSRF-safe page fetch — validates the URL (and every redirect hop)
+ * against the private-IP blocklist before connecting. Returns "" on any
+ * failure (including a blocked unsafe URL) so callers degrade gracefully. */
 async function fetchPage(url: string, referer?: string): Promise<string> {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 15_000)
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
+    const res = await safeFetch(url, {
+      timeoutMs: 15_000,
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
@@ -155,18 +173,13 @@ async function fetchPage(url: string, referer?: string): Promise<string> {
     return unescapeHtml(await res.text())
   } catch {
     return ""
-  } finally {
-    clearTimeout(t)
   }
 }
 
 async function fetchText(url: string, referer?: string): Promise<string> {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), 15_000)
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
+    const res = await safeFetch(url, {
+      timeoutMs: 15_000,
       headers: {
         "User-Agent": BROWSER_UA,
         Accept: "*/*",
@@ -181,8 +194,6 @@ async function fetchText(url: string, referer?: string): Promise<string> {
     return txt.length > 3_000_000 ? txt.slice(0, 3_000_000) : txt
   } catch {
     return ""
-  } finally {
-    clearTimeout(t)
   }
 }
 
@@ -305,23 +316,37 @@ export async function probeWithFallbacks(
   url: string,
   cookiesPath: string | null
 ): Promise<YtdlpEntry> {
-  const base = ["-J", "--no-playlist", "--no-warnings", "--user-agent", BROWSER_UA, ...cookieArgs(cookiesPath)]
+  const base = ["-J", "--no-playlist", "--no-warnings", "--user-agent", BROWSER_UA]
+  const noCookieBase = [...base]
+  const withCookieBase = [...base, ...cookieArgs(cookiesPath)]
   const errors: string[] = []
 
+  // Cookies-first is NOT the default anymore: forcing saved cookies into
+  // every attempt (even for plainly public videos) can trip extra
+  // rate-limits/session-rotation on some platforms. Try public/no-cookie
+  // extraction first; only fall back to cookies if the public attempt
+  // itself signals a login/age/private requirement.
   try {
-    return await runProbe([...base, url], 75_000)
+    return await runProbe([...noCookieBase, url], 75_000)
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e))
   }
+  if (cookiesPath) {
+    try {
+      return await runProbe([...withCookieBase, url], 60_000)
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e))
+    }
+  }
   if (await canImpersonate()) {
     try {
-      return await runProbe([...base, "--impersonate", "chrome", url], 60_000)
+      return await runProbe([...withCookieBase, "--impersonate", "chrome", url], 60_000)
     } catch (e) {
       errors.push(e instanceof Error ? e.message : String(e))
     }
   }
   try {
-    return await runProbe([...base, "--force-generic-extractor", url], 45_000)
+    return await runProbe([...withCookieBase, "--force-generic-extractor", url], 45_000)
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e))
   }
@@ -332,7 +357,7 @@ export async function probeWithFallbacks(
   const embed = candidates.find((c) => c.kind === "embed")
   if (embed) {
     try {
-      return await runProbe([...base, embed.url], 60_000)
+      return await runProbe([...withCookieBase, embed.url], 60_000)
     } catch (e) {
       errors.push(e instanceof Error ? e.message : String(e))
     }
@@ -410,7 +435,7 @@ export async function downloadWithFallbacks(opts: {
   const deadline = Date.now() + 25 * 60 * 1000
   const timeLeft = () => deadline - Date.now()
   const outTpl = path.join(dir, "%(title).80s.%(ext)s")
-  const base = [
+  const commonBase = [
     "--no-playlist",
     "--no-warnings",
     "--restrict-filenames",
@@ -424,10 +449,11 @@ export async function downloadWithFallbacks(opts: {
     MAX_FILESIZE,
     "--user-agent",
     BROWSER_UA,
-    ...cookieArgs(cookiesPath),
     "-o",
     outTpl,
   ]
+  const noCookieBase = [...commonBase]
+  const withCookieBase = [...commonBase, ...cookieArgs(cookiesPath)]
   const errors: string[] = []
 
   const tryAttempt = async (method: string, args: string[], timeout: number): Promise<DownloadSuccess | null> => {
@@ -456,35 +482,49 @@ export async function downloadWithFallbacks(opts: {
     return { filename: best.name, sizeBytes: best.size, method, durationSec: check.durationSec }
   }
 
-  // 1. Native extractor — up to 20 minutes for a large single file
-  let r = await tryAttempt("native", [...formatArgs, ...base, url], 20 * 60 * 1000)
+  // If a specific height/quality selector isn't available for this site,
+  // fall back to plain best/worst rather than failing outright.
+  const robust = (base: string[]) =>
+    formatArgs[0] === "-f" ? ["-f", `${formatArgs[1]}/best/worst`, ...formatArgs.slice(2), ...base] : [...formatArgs, ...base]
+
+  // 1. Native extractor, no cookies first (avoids unnecessarily forcing a
+  // saved login session onto plainly public content).
+  let r = await tryAttempt("native", [...robust(noCookieBase), url], 20 * 60 * 1000)
   if (r) return r
-  // 2. Native + browser TLS impersonation (beats many anti-bot walls)
-  if (await canImpersonate()) {
-    r = await tryAttempt("impersonate", [...formatArgs, ...base, "--impersonate", "chrome", url], 15 * 60 * 1000)
+  // 2. Native + cookies (only if the visitor has saved cookies for this platform)
+  if (cookiesPath) {
+    r = await tryAttempt("native-cookie", [...robust(withCookieBase), url], 15 * 60 * 1000)
     if (r) return r
   }
-  // 3. Generic extractor
-  r = await tryAttempt("generic", [...formatArgs, ...base, "--force-generic-extractor", url], 10 * 60 * 1000)
+  // 3. Native + browser TLS impersonation (beats many anti-bot walls)
+  if (await canImpersonate()) {
+    r = await tryAttempt("impersonate", [...robust(withCookieBase), "--impersonate", "chrome", url], 15 * 60 * 1000)
+    if (r) return r
+  }
+  // 4. Generic extractor
+  r = await tryAttempt("generic", [...robust(withCookieBase), "--force-generic-extractor", url], 10 * 60 * 1000)
   if (r) return r
-  // 4. Page scan → direct/HLS/DASH candidates
+  // 5. Page scan → direct/HLS/DASH candidates
   const candidates = await scanPageForMedia(url).catch(() => [] as MediaCandidate[])
   let decoyFallback: DownloadSuccess | null = null
   for (const c of candidates) {
     if (timeLeft() < 30_000) break
     // Embeds go through yt-dlp's native extractor (best A/V); direct single
     // files skip format merging; manifests keep the quality selector.
-    const fmt = c.kind === "direct" ? (audioOnly ? formatArgs : []) : formatArgs
+    const fmt = c.kind === "direct" ? (audioOnly ? formatArgs : []) : robust([])
     const refArgs = c.kind === "embed" ? [] : ["--referer", c.referer]
     r = await tryAttempt(
       `page-scan:${c.kind}`,
-      [...fmt, ...base, ...refArgs, c.url],
+      [...fmt, ...withCookieBase, ...refArgs, c.url],
       8 * 60 * 1000
     )
     if (r) {
-      // Suspiciously short & tiny files are usually preview/teaser decoys -
-      // keep the best one aside but try the remaining candidates first.
-      const suspicious = (r.durationSec ?? 0) < 20 && r.sizeBytes < 2_000_000
+      // Suspiciously short & tiny files are usually preview/teaser/ad
+      // decoys — keep the best one aside but try remaining candidates
+      // first. Raised the size bar (5MB) since some ad decoys are a few
+      // MB (e.g. app-install promo clips) yet still clearly not the real
+      // requested video when duration is very short.
+      const suspicious = (r.durationSec ?? 0) < 15 && r.sizeBytes < 5_000_000
       if (!suspicious) return r
       if (!decoyFallback || r.sizeBytes > decoyFallback.sizeBytes) {
         const kept = path.join(dir, ".keep-" + r.filename)
@@ -509,3 +549,5 @@ export async function downloadWithFallbacks(opts: {
   err.failure = { ...failure, detail: joined.slice(0, 900) }
   throw err
 }
+
+export { UnsafeUrlError }

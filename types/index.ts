@@ -20,6 +20,8 @@ export interface DownloadResult {
   sizeBytes: number
 }
 
+export type JobStatus = "queued" | "downloading" | "complete" | "failed"
+
 export interface HistoryItem {
   id: string
   url: string
@@ -30,4 +32,6 @@ export interface HistoryItem {
   filename: string
   fileId: string
   downloadedAt: string
+  status?: JobStatus // undefined = legacy items from before this field existed; treated as complete
+  error?: string
 }

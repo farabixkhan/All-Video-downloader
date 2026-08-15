@@ -39,6 +39,35 @@ export default function HomePage() {
     }
   }, [])
 
+  // Called the instant Download is clicked — item appears immediately.
+  const handleQueued = useCallback(
+    (item: HistoryItem) => {
+      setHistory((prev) => {
+        const next = [item, ...prev].slice(0, 50)
+        try {
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+        } catch {
+          // ignore
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  // Called once the server responds — patches the same item with final state.
+  const handleSettled = useCallback((id: string, patch: Partial<HistoryItem>) => {
+    setHistory((prev) => {
+      const next = prev.map((h) => (h.id === id ? { ...h, ...patch } : h))
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
+  }, [])
+
   const handlePaste = async () => {
     try {
       const text = await navigator.clipboard.readText()
@@ -145,7 +174,8 @@ export default function HomePage() {
           <VideoCard
             info={info}
             sourceUrl={fetchedUrl}
-            onDownloaded={(item) => saveHistory([item, ...history])}
+            onQueued={handleQueued}
+            onSettled={handleSettled}
           />
         )}
 
