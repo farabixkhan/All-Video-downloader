@@ -21,18 +21,20 @@ RUN python3 -m venv /opt/ytdlp-venv \
 
 WORKDIR /app
 
-# IMPORTANT: do NOT set NODE_ENV=production before `npm install` — that
-# makes npm skip devDependencies (typescript/tailwind/etc.), which are
-# required to build. Install first (default NODE_ENV in a fresh Docker
-# build is unset/clean, so this is safe), THEN build, THEN switch to
-# production only for the runtime `next start`.
+# Install with devDependencies included (NODE_ENV NOT set yet — setting it
+# to "production" before `npm install` would make npm skip the
+# typescript/tailwind/etc. devDependencies that the build step needs).
 COPY package.json package-lock.json* ./
 RUN npm install
+
+# NOW switch to production — required for `next build` itself (an unset/
+# non-standard NODE_ENV during the build step causes a Next.js internal
+# error page generation bug), and also correct for the runtime `next start`.
+ENV NODE_ENV=production
 
 COPY . .
 RUN npm run build
 
-ENV NODE_ENV=production
 EXPOSE 3000
 
 CMD ["sh", "-c", "npx next start -p ${PORT:-3000}"]

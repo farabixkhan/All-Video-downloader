@@ -7,6 +7,9 @@ export interface VideoInfo {
   platform: string
   webpageUrl: string
   formats: FormatOption[]
+  /** Short-lived resolver token — pass this to /api/download to reuse the
+   * already-resolved metadata/cookie context instead of resolving again. */
+  resolveId?: string
 }
 
 export interface FormatOption {

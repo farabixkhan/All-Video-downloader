@@ -4,6 +4,7 @@ import { probeWithFallbacks, classifyFailure } from "@/lib/extract"
 import { cookiesPathForPlatform, SESSION_COOKIE } from "@/lib/session"
 import { isSafeToFetch } from "@/lib/security/safe-url"
 import { checkRateLimit, clientKey, extractGuard } from "@/lib/security/rate-limit"
+import { putResolve } from "@/lib/resolve-cache"
 import { VideoInfo } from "@/types"
 
 export const maxDuration = 120
@@ -59,6 +60,10 @@ export async function POST(request: NextRequest) {
       })
       .map(([value, v]) => ({ value, label: v.label }))
 
+    // Cache the resolved probe once so /api/download can reuse it instead
+    // of re-deriving the platform/cookie context from scratch.
+    const resolveId = putResolve(url, cookiesPath, entry)
+
     const info: VideoInfo = {
       id: entry.id ?? crypto.randomUUID(),
       title: entry.title ?? "Untitled video",
@@ -68,6 +73,7 @@ export async function POST(request: NextRequest) {
       platform: detectPlatform(url),
       webpageUrl: entry.webpage_url ?? url,
       formats,
+      resolveId,
     }
     return NextResponse.json(info)
   } catch (err: unknown) {

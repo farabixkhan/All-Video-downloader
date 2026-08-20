@@ -72,7 +72,10 @@ export function VideoCard({ info, sourceUrl, onQueued, onSettled }: VideoCardPro
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: sourceUrl, quality }),
+        // Send the resolveId from /api/info's response when available so the
+        // server can reuse the already-resolved context (Phase 2) instead of
+        // re-deriving platform/cookie info from the raw URL again.
+        body: JSON.stringify({ url: sourceUrl, quality, resolveId: info.resolveId }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? "Download failed")

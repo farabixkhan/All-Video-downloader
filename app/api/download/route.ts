@@ -6,6 +6,7 @@ import { downloadWithFallbacks, classifyFailure, ExtractionFailure } from "@/lib
 import { cookiesPathForPlatform, SESSION_COOKIE } from "@/lib/session"
 import { isSafeToFetch } from "@/lib/security/safe-url"
 import { checkRateLimit, clientKey, downloadGuard } from "@/lib/security/rate-limit"
+import { getResolve } from "@/lib/resolve-cache"
 import { DownloadResult } from "@/types"
 
 // Large (up to 5GB) downloads need real time on a slow connection —
@@ -20,12 +21,25 @@ export async function POST(request: NextRequest) {
   const sessionId = request.cookies.get(SESSION_COOKIE)?.value
   let url = ""
   let quality = "best"
+  let resolveId = ""
   try {
     const body = await request.json()
     url = String(body?.url ?? "").trim()
     quality = String(body?.quality ?? "best")
+    resolveId = String(body?.resolveId ?? "")
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 })
+  }
+
+  // Prefer reusing an already-resolved probe (Phase 2: no re-derivation of
+  // platform/cookie context) — falls back to a fresh url if the resolveId
+  // is missing/expired, so older clients / "download again" from history
+  // still work.
+  let cookiesPath: string | null = null
+  const cached = resolveId ? getResolve(resolveId) : null
+  if (cached) {
+    url = cached.url
+    cookiesPath = cached.cookiesPath
   }
 
   if (!isValidUrl(url)) {
@@ -44,7 +58,9 @@ export async function POST(request: NextRequest) {
   }
 
   const q = QUALITY_MAP[quality] ?? QUALITY_MAP.best
-  const cookiesPath = sessionId ? cookiesPathForPlatform(sessionId, platformKey(url)) : null
+  if (!cached && sessionId) {
+    cookiesPath = cookiesPathForPlatform(sessionId, platformKey(url))
+  }
 
   const fileId = crypto.randomUUID()
   const dir = path.join(DOWNLOAD_ROOT, fileId)
