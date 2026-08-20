@@ -380,10 +380,11 @@ export async function probeWithFallbacks(
 }
 
 // ---------------------------------------------------------------------------
-// Download with fallbacks: native → impersonate → generic → page-scan
-// candidates. Every attempt's output is deep-validated; fakes are deleted.
-// Deadline is generous (25 min) so full-length, large (up to 5GB) videos
-// have time to finish on a normal connection instead of being cut off.
+// Download with fallbacks: cached-info-json → native → impersonate →
+// generic → page-scan candidates. Every attempt's output is deep-validated;
+// fakes are deleted. Deadline is generous (25 min) so full-length, large
+// (up to 5GB) videos have time to finish on a normal connection instead of
+// being cut off.
 // ---------------------------------------------------------------------------
 
 export interface DownloadSuccess {
@@ -427,8 +428,13 @@ export async function downloadWithFallbacks(opts: {
   dir: string
   formatArgs: string[]
   cookiesPath: string | null
+  /** Path to a previously-saved yt-dlp info.json (from /api/info's probe).
+   * When present, tried FIRST via `--load-info-json`, which skips
+   * re-extracting the page/video entirely — this is what actually
+   * eliminates the duplicate extraction, not just reusing the raw URL. */
+  infoJsonPath?: string | null
 }): Promise<DownloadSuccess> {
-  const { url, dir, formatArgs, cookiesPath } = opts
+  const { url, dir, formatArgs, cookiesPath, infoJsonPath } = opts
   const audioOnly = formatArgs.includes("-x")
   // 25 minutes total — enough headroom for a full 5GB file on a normal
   // connection, across every fallback strategy combined.
@@ -486,6 +492,21 @@ export async function downloadWithFallbacks(opts: {
   // fall back to plain best/worst rather than failing outright.
   const robust = (base: string[]) =>
     formatArgs[0] === "-f" ? ["-f", `${formatArgs[1]}/best/worst`, ...formatArgs.slice(2), ...base] : [...formatArgs, ...base]
+
+  // 0. Reuse the cached probe (from /api/info) via --load-info-json — this
+  // is the step that actually skips a second full extraction. No URL is
+  // passed here; yt-dlp resolves formats straight from the saved JSON.
+  // Falls through to a fresh extraction below if the cached format URLs
+  // have expired (common for signed CDN links) or the platform doesn't
+  // support this path well.
+  if (infoJsonPath) {
+    const r0 = await tryAttempt(
+      "cached-info-json",
+      [...robust(noCookieBase), "--load-info-json", infoJsonPath],
+      10 * 60 * 1000
+    )
+    if (r0) return r0
+  }
 
   // 1. Native extractor, no cookies first (avoids unnecessarily forcing a
   // saved login session onto plainly public content).

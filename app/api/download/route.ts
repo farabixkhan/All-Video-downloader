@@ -31,15 +31,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 })
   }
 
-  // Prefer reusing an already-resolved probe (Phase 2: no re-derivation of
-  // platform/cookie context) — falls back to a fresh url if the resolveId
-  // is missing/expired, so older clients / "download again" from history
-  // still work.
+  // Prefer reusing an already-resolved probe (Phase 2). getResolve() only
+  // returns a hit if it hasn't expired AND — when the resolve used cookies —
+  // it belongs to this same session (prevents one session's cookie-backed
+  // resolve being replayed by another). infoJsonPath lets the download
+  // skip a second full extraction via yt-dlp's --load-info-json.
   let cookiesPath: string | null = null
-  const cached = resolveId ? getResolve(resolveId) : null
+  let infoJsonPath: string | null = null
+  const cached = resolveId ? getResolve(resolveId, sessionId) : null
   if (cached) {
     url = cached.url
     cookiesPath = cached.cookiesPath
+    infoJsonPath = cached.infoJsonPath
   }
 
   if (!isValidUrl(url)) {
@@ -67,10 +70,10 @@ export async function POST(request: NextRequest) {
   await fs.mkdir(dir, { recursive: true })
 
   try {
-    // Multi-strategy pipeline: no-cookie native -> cookie native -> impersonation
-    // -> generic -> page scan. Output is deep-validated (signature + ffprobe);
-    // fakes are auto-deleted. Files are capped at MAX_FILESIZE (5GB).
-    const out = await downloadWithFallbacks({ url, dir, formatArgs: q.args, cookiesPath })
+    // cached-info-json (skips re-extraction) -> native no-cookie -> cookie
+    // -> impersonation -> generic -> page scan. Output is deep-validated
+    // (signature + ffprobe); fakes are auto-deleted. Capped at MAX_FILESIZE.
+    const out = await downloadWithFallbacks({ url, dir, formatArgs: q.args, cookiesPath, infoJsonPath })
     const result: DownloadResult = { fileId, filename: out.filename, sizeBytes: out.sizeBytes }
     return NextResponse.json({ ...result, method: out.method, durationSec: out.durationSec })
   } catch (err: unknown) {

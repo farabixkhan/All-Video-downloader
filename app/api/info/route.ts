@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const sessionId = request.cookies.get(SESSION_COOKIE)?.value
+  const sessionId = request.cookies.get(SESSION_COOKIE)?.value ?? null
   const cookiesPath = sessionId ? cookiesPathForPlatform(sessionId, platformKey(url)) : null
 
   try {
@@ -60,9 +60,10 @@ export async function POST(request: NextRequest) {
       })
       .map(([value, v]) => ({ value, label: v.label }))
 
-    // Cache the resolved probe once so /api/download can reuse it instead
-    // of re-deriving the platform/cookie context from scratch.
-    const resolveId = putResolve(url, cookiesPath, entry)
+    // Cache the resolved probe (including the raw entry, written to a temp
+    // info.json) so /api/download can skip re-extracting via
+    // --load-info-json instead of re-deriving everything from the URL.
+    const resolveId = await putResolve(url, cookiesPath, sessionId, entry)
 
     const info: VideoInfo = {
       id: entry.id ?? crypto.randomUUID(),
