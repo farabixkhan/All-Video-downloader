@@ -3,6 +3,7 @@ import { promises as fs } from "fs"
 import path from "path"
 import { getOrCreateSessionId, cookiesPathForPlatform, SESSION_COOKIE } from "@/lib/session"
 import { PLATFORM_KEYS, PlatformKey } from "@/lib/ytdlp"
+import { checkRateLimit, clientKey } from "@/lib/security/rate-limit"
 
 function attachSessionCookie(res: NextResponse, sessionId: string) {
   res.cookies.set(SESSION_COOKIE, sessionId, {
@@ -20,6 +21,9 @@ function isPlatformKey(v: string): v is PlatformKey {
 
 // GET -> status of every platform's cookie file for this visitor's session
 export async function GET(request: NextRequest) {
+  if (!checkRateLimit(`cookies-get:${clientKey(request)}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — please slow down." }, { status: 429 })
+  }
   const { sessionId, isNew } = getOrCreateSessionId(request.cookies.get(SESSION_COOKIE)?.value)
   const platforms: Record<string, { configured: boolean; updatedAt?: string }> = {}
   for (const key of PLATFORM_KEYS) {
@@ -38,6 +42,9 @@ export async function GET(request: NextRequest) {
 
 // POST { platform, content } -> save cookies.txt for one specific platform
 export async function POST(request: NextRequest) {
+  if (!checkRateLimit(`cookies-write:${clientKey(request)}`, 10, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — please slow down." }, { status: 429 })
+  }
   const { sessionId } = getOrCreateSessionId(request.cookies.get(SESSION_COOKIE)?.value)
   let content = ""
   let platform = ""
@@ -72,6 +79,9 @@ export async function POST(request: NextRequest) {
 
 // DELETE ?platform=youtube -> remove cookies.txt for one specific platform
 export async function DELETE(request: NextRequest) {
+  if (!checkRateLimit(`cookies-write:${clientKey(request)}`, 10, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — please slow down." }, { status: 429 })
+  }
   const { sessionId } = getOrCreateSessionId(request.cookies.get(SESSION_COOKIE)?.value)
   const { searchParams } = new URL(request.url)
   const platform = searchParams.get("platform") ?? ""

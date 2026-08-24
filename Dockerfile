@@ -1,9 +1,11 @@
 FROM node:22-slim
 
 # System deps: python3/pip for yt-dlp, ffmpeg for media validation/merging,
-# unzip/curl for the Deno installer.
+# unzip/curl for the Deno installer, git + canvas build deps for the
+# optional YouTube PO-token provider below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv ffmpeg curl unzip ca-certificates \
+    python3 python3-pip python3-venv ffmpeg curl unzip git ca-certificates \
+    build-essential pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Deno — yt-dlp's recommended JS runtime for solving modern YouTube
@@ -19,6 +21,20 @@ RUN python3 -m venv /opt/ytdlp-venv \
     && /opt/ytdlp-venv/bin/pip install --no-cache-dir -U "yt-dlp[default]" curl_cffi \
     && ln -s /opt/ytdlp-venv/bin/yt-dlp /usr/local/bin/yt-dlp
 
+# OPTIONAL: YouTube PO-Token provider (bgutil-ytdlp-pot-provider, script
+# mode). yt-dlp only calls this when its own logic decides a specific
+# client/format actually requires a proof-of-origin token — normal public,
+# no-cookie extraction is completely unaffected and always tried first.
+# Best-effort: if this step fails for any reason (network hiccup, native
+# `canvas` build issue, etc.) the build continues WITHOUT it rather than
+# failing the whole deploy, since it's a fallback, not a requirement.
+RUN ( git clone --depth 1 --branch 1.3.2 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /root/bgutil-ytdlp-pot-provider \
+      && cd /root/bgutil-ytdlp-pot-provider/server \
+      && npm ci \
+      && npx tsc \
+      && /opt/ytdlp-venv/bin/pip install --no-cache-dir bgutil-ytdlp-pot-provider ) \
+    || echo "WARN: optional YouTube PO-token provider setup failed — continuing without it (public extraction is unaffected)"
+
 WORKDIR /app
 
 # Install with devDependencies included (NODE_ENV NOT set yet — setting it
@@ -28,8 +44,8 @@ COPY package.json package-lock.json* ./
 RUN npm install
 
 # NOW switch to production — required for `next build` itself (an unset/
-# non-standard NODE_ENV during the build step causes a Next.js internal
-# error page generation bug), and also correct for the runtime `next start`.
+# non-standard NODE_ENV during the build step caused a build error in
+# testing), and also correct for the runtime `next start`.
 ENV NODE_ENV=production
 
 COPY . .
