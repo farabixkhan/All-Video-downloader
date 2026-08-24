@@ -44,6 +44,13 @@ RUN ( git clone --depth 1 --branch ${BGUTIL_POT_VERSION} https://github.com/Brai
       && /opt/ytdlp-venv/bin/pip install --no-cache-dir "bgutil-ytdlp-pot-provider==${BGUTIL_POT_VERSION}" ) \
     || echo "WARN: optional YouTube PO-token provider setup failed — continuing without it (public extraction is unaffected)"
 
+# This app always runs behind exactly one trusted reverse proxy in
+# production (Render's own edge load balancer), so it's safe to trust the
+# X-Forwarded-For entry that hop appends. Local/dev runs without this env
+# var default to NOT trusting forwarded headers (see lib/security/rate-limit.ts).
+ENV TRUST_PROXY=true
+ENV TRUSTED_PROXY_HOPS=1
+
 WORKDIR /app
 
 # Install with devDependencies included (NODE_ENV NOT set yet — setting it
