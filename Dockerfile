@@ -25,14 +25,23 @@ RUN python3 -m venv /opt/ytdlp-venv \
 # mode). yt-dlp only calls this when its own logic decides a specific
 # client/format actually requires a proof-of-origin token — normal public,
 # no-cookie extraction is completely unaffected and always tried first.
+#
+# BGUTIL_POT_VERSION is the SINGLE source of truth: it pins the git tag
+# cloned/built below AND the exact pip plugin version installed, and is
+# exported as PO_PROVIDER_VERSION so app/lib/health.ts's runtime check can
+# confirm the installed plugin actually matches the built server script
+# instead of silently drifting apart.
+#
 # Best-effort: if this step fails for any reason (network hiccup, native
 # `canvas` build issue, etc.) the build continues WITHOUT it rather than
 # failing the whole deploy, since it's a fallback, not a requirement.
-RUN ( git clone --depth 1 --branch 1.3.2 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /root/bgutil-ytdlp-pot-provider \
+ARG BGUTIL_POT_VERSION=1.3.2
+ENV PO_PROVIDER_VERSION=${BGUTIL_POT_VERSION}
+RUN ( git clone --depth 1 --branch ${BGUTIL_POT_VERSION} https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /root/bgutil-ytdlp-pot-provider \
       && cd /root/bgutil-ytdlp-pot-provider/server \
       && npm ci \
       && npx tsc \
-      && /opt/ytdlp-venv/bin/pip install --no-cache-dir bgutil-ytdlp-pot-provider ) \
+      && /opt/ytdlp-venv/bin/pip install --no-cache-dir "bgutil-ytdlp-pot-provider==${BGUTIL_POT_VERSION}" ) \
     || echo "WARN: optional YouTube PO-token provider setup failed — continuing without it (public extraction is unaffected)"
 
 WORKDIR /app
