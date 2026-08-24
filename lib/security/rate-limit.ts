@@ -14,11 +14,38 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>()
 
+// Hard cap on the number of distinct rate-limit buckets kept in memory at
+// once. Without this, an attacker rotating through many spoofed/forged
+// keys (or just organic traffic from many distinct IPs) could grow this
+// Map without bound. Configurable via env for tuning without a code change.
+const MAX_BUCKETS = (() => {
+  const n = parseInt(process.env.RATE_LIMIT_MAX_BUCKETS || "10000", 10)
+  return Number.isFinite(n) && n > 0 ? n : 10000
+})()
+
+/** Frees space for a new bucket when at capacity: first by dropping any
+ * already-expired buckets, then — if still full — by evicting the oldest
+ * entries (Map iterates in insertion order, so the first keys are the
+ * longest-standing ones). Never evicts more than necessary. */
+function evictIfFull(now: number): void {
+  if (buckets.size < MAX_BUCKETS) return
+  for (const [key, b] of buckets) {
+    if (buckets.size < MAX_BUCKETS) break
+    if (b.resetAt <= now) buckets.delete(key)
+  }
+  while (buckets.size >= MAX_BUCKETS) {
+    const oldestKey = buckets.keys().next().value
+    if (oldestKey === undefined) break
+    buckets.delete(oldestKey)
+  }
+}
+
 /** Simple fixed-window limiter. Returns true if the request is allowed. */
 export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
   const now = Date.now()
   const existing = buckets.get(key)
   if (!existing || existing.resetAt <= now) {
+    evictIfFull(now)
     buckets.set(key, { count: 1, resetAt: now + windowMs })
     return true
   }
@@ -27,11 +54,14 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
   return true
 }
 
-// Periodic sweep so the map doesn't grow forever
+// Periodic sweep so the map doesn't grow forever between requests even
+// when nothing triggers evictIfFull.
 setInterval(() => {
   const now = Date.now()
   for (const [key, b] of buckets) if (b.resetAt <= now) buckets.delete(key)
 }, 5 * 60 * 1000).unref?.()
+
+export const __testing = { buckets, MAX_BUCKETS }
 
 // ---------------------------------------------------------------------------
 // Trusted-proxy-aware client IP detection
